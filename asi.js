@@ -1257,15 +1257,22 @@ Kirimkan link konfigurasi V2Ray dan saya akan mengubahnya ke format *Singbox*, *
   }
     
   async addUserToKv(from) {
-    if (!from || !from.id) return;
-    const userId = from.id.toString();
-    const userData = {
-      id: from.id,
-      first_name: from.first_name || null,
-      last_name: from.last_name || null,
-      username: from.username || null
-    };
-    await this.kv.put(`user:${userId}`, JSON.stringify(userData));
+    if (!this.kv) {
+        return;
+    }
+    try {
+        if (!from || !from.id) return;
+        const userId = from.id.toString();
+        const userData = {
+            id: from.id,
+            first_name: from.first_name || null,
+            last_name: from.last_name || null,
+            username: from.username || null
+        };
+        await this.kv.put(`user:${userId}`, JSON.stringify(userData));
+    } catch (error) {
+        console.error("Failed to add user to KV:", error);
+    }
   }
 
   async sendMessage(chatId, text, options = {}) {
@@ -1339,15 +1346,25 @@ Kirimkan link konfigurasi V2Ray dan saya akan mengubahnya ke format *Singbox*, *
   }
 
   async getAllUsers() {
-    const list = await this.kv.list({ prefix: "user:" });
-    const users = [];
-    for (const key of list.keys) {
-      const userData = await this.kv.get(key.name, "json");
-      if (userData) {
-        users.push(userData);
-      }
+    if (!this.kv) {
+        return [];
     }
-    return users;
+    try {
+        const list = await this.kv.list({
+            prefix: "user:"
+        });
+        const users = [];
+        for (const key of list.keys) {
+            const userData = await this.kv.get(key.name, "json");
+            if (userData) {
+                users.push(userData);
+            }
+        }
+        return users;
+    } catch (error) {
+        console.error("Failed to get all users from KV:", error);
+        return [];
+    }
   }
 
   async sendBroadcastMessage(message) {
@@ -1441,49 +1458,65 @@ Gagal dikirim: *${failCount}*`;
   }
 
   async sendUserList(chatId, page = 0, messageId = null, options = {}) {
-    const pageSize = 10;
-    const list = await this.kv.list({ prefix: "user:" });
-    const userKeys = list.keys;
-    const totalUsers = userKeys.length;
-    const totalPages = Math.ceil(totalUsers / pageSize);
-    const start = page * pageSize;
-    const end = start + pageSize;
-    const pageKeys = userKeys.slice(start, end);
-
-    let userListText = `*Daftar Pengguna (${start + 1}-${Math.min(end, totalUsers)} dari ${totalUsers})*\n\n`;
-
-    for (const key of pageKeys) {
-      const userData = await this.kv.get(key.name, "json");
-      if (userData) {
-        const firstName = userData.first_name || "";
-        const lastName = userData.last_name || "";
-        const username = userData.username ? ` (@${userData.username})` : "";
-        userListText += `*ID:* \`${userData.id}\`\n*Nama:* ${firstName} ${lastName}${username}\n\n`;
-      }
+    if (!this.kv) {
+        await this.sendMessage(chatId, "❌ Database pengguna saat ini tidak tersedia.", options);
+        return;
     }
+    try {
+        const pageSize = 10;
+        const list = await this.kv.list({
+            prefix: "user:"
+        });
+        const userKeys = list.keys;
+        const totalUsers = userKeys.length;
+        const totalPages = Math.ceil(totalUsers / pageSize);
+        const start = page * pageSize;
+        const end = start + pageSize;
+        const pageKeys = userKeys.slice(start, end);
+        let userListText = `*Daftar Pengguna (${start + 1}-${Math.min(end, totalUsers)} dari ${totalUsers})*\n\n`;
+        for (const key of pageKeys) {
+            const userData = await this.kv.get(key.name, "json");
+            if (userData) {
+                const firstName = userData.first_name || "";
+                const lastName = userData.last_name || "";
+                const username = userData.username ? ` (@${userData.username})` : "";
+                userListText += `*ID:* \`${userData.id}\`\n*Nama:* ${firstName} ${lastName}${username}\n\n`;
+            }
+        }
+        const inline_keyboard = [];
+        const navButtons = [];
+        if (page > 0) {
+            navButtons.push({
+                text: "⬅️ Prev",
+                callback_data: `userlist_page_${page - 1}`
+            });
+        }
+        if (end < totalUsers) {
+            navButtons.push({
+                text: "Next ➡️",
+                callback_data: `userlist_page_${page + 1}`
+            });
+        }
+        if (navButtons.length > 0) {
+            inline_keyboard.push(navButtons);
+        }
+        const requestOptions = {
+            parse_mode: "Markdown",
+            reply_markup: {
+                inline_keyboard
+            },
+            ...options
+        };
+        if (messageId) {
+            await this.editMessageText(chatId, messageId, userListText, requestOptions);
+        } else {
+            await this.sendMessage(chatId, userListText, requestOptions);
+        }
+    } catch (error) {
+        console.error("Failed to send user list:", error);
+        await this.sendMessage(chatId, `❌ Gagal mengambil daftar pengguna.
 
-    const inline_keyboard = [];
-    const navButtons = [];
-    if (page > 0) {
-      navButtons.push({ text: "⬅️ Prev", callback_data: `userlist_page_${page - 1}` });
-    }
-    if (end < totalUsers) {
-      navButtons.push({ text: "Next ➡️", callback_data: `userlist_page_${page + 1}` });
-    }
-    if (navButtons.length > 0) {
-      inline_keyboard.push(navButtons);
-    }
-
-    const requestOptions = {
-      parse_mode: "Markdown",
-      reply_markup: { inline_keyboard },
-      ...options
-    };
-
-    if (messageId) {
-      await this.editMessageText(chatId, messageId, userListText, requestOptions);
-    } else {
-      await this.sendMessage(chatId, userListText, requestOptions);
+Penyebab: ${error.message}`, options);
     }
   }
   
