@@ -1100,12 +1100,10 @@ const Converterbot = class {
       weekday: 'long',
       year: 'numeric',
       month: 'long',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
+      day: 'numeric'
     });
 
-    const footer = `\n\n════════════════════════\n🕒 ${timestamp}\n_• 📨 Pesan resmi dari admin •_`;
+    const footer = `\n\n═════════════════\n🕒 ${timestamp}\n_• 📨 Pesan resmi dari admin •_`;
 
     // Styling premium berdasarkan tipe konten
     let styledMessage = message;
@@ -1157,6 +1155,67 @@ const Converterbot = class {
     return `✅ *SUKSES*\n\n${message}\n\n🎉 Selamat menikmati!`;
   }
 
+  async generateUserListPage(page) {
+    const allUsers = await this.getAllUsers() || [];
+    const totalUsers = allUsers.length;
+
+    if (totalUsers === 0) {
+        return { messageText: "📭 *Belum ada pengguna yang terdaftar.*\n\n💡 *Pengguna akan otomatis terdaftar ketika berinteraksi dengan bot.*", keyboard: [] };
+    }
+
+    const pageSize = 10;
+    const totalPages = Math.ceil(totalUsers / pageSize);
+    const start = page * pageSize;
+    const end = start + pageSize;
+    const pageUsers = allUsers.slice(start, end);
+
+    const userListText = pageUsers.map((user, index) => {
+        const userNumber = start + index + 1;
+        const userId = typeof user === "object" ? user.id : user;
+        const username = typeof user === "object" ? user.username : null;
+        const escapeMarkdown = (text) => {
+            if (text === null || typeof text === 'undefined') {
+                return '';
+            }
+            return text.toString().replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
+        };
+        let userLine = `👤 **${userNumber}.**`;
+        if (username && username !== "N/A") {
+            userLine += ` ${escapeMarkdown(username)}`;
+        }
+        const idLine = `🆔 ID: \`${userId}\``;
+        return `${userLine}\n${idLine}`;
+    }).join("\n\n");
+
+    const messageText = `🎯 **DAFTAR PENGGUNA**\n
+╔═══════════════════╗
+📊 **Total:** ${totalUsers} pengguna
+📄 **Halaman:** ${page + 1}/${totalPages}
+╚═══════════════════╝
+
+${userListText}`;
+
+    const keyboard = [];
+    const row = [];
+
+    if (page > 0) {
+        row.push({ text: "⬅️ Prev", callback_data: `userlist_page_${page - 1}` });
+    }
+    if (page < totalPages - 1) {
+        row.push({ text: "Next ➡️", callback_data: `userlist_page_${page + 1}` });
+    }
+
+    if (row.length > 0) {
+        keyboard.push(row);
+    }
+
+    keyboard.push([
+        { text: "🔄 Refresh", callback_data: "userlist_page_0" }
+    ]);
+
+    return { messageText, keyboard };
+  }
+
   async handleUpdate(update) {
     if (update.callback_query) {
       return this.handleCallbackQuery(update.callback_query);
@@ -1176,29 +1235,43 @@ const Converterbot = class {
     // Handler untuk broadcast message (admin only)
     if (update.message.from.id.toString() === this.ownerId.toString()) {
         if (text.startsWith("/broadcast")) {
+            const lockKey = `broadcast_lock_${messageId}`;
+            const isLocked = await this.kv.get(lockKey);
+
+            if (isLocked) {
+                // Pesan sudah diproses oleh instance lain, abaikan
+                return new Response("OK", { status: 200 });
+            }
+
+            // Atur kunci dengan TTL 60 detik untuk mencegah duplikasi
+            await this.kv.put(lockKey, "locked", { expirationTtl: 60 });
+            
+            // Hardcode target topic ID
+            const broadcastOptions = { ...options, message_thread_id: 1876 };
+
             const broadcastCaption = text.substring("/broadcast".length).trim();
           
             if (reply) {
                 if (reply.photo) {
                     const file_id = reply.photo[reply.photo.length - 1].file_id;
                     const formattedCaption = this.formatMediaCaption(broadcastCaption, 'photo');
-                    await this.sendBroadcastPhoto(file_id, formattedCaption, options);
+                    await this.sendBroadcastPhoto(file_id, formattedCaption, broadcastOptions);
                 } else if (reply.video) {
                     const file_id = reply.video.file_id;
                     const formattedCaption = this.formatMediaCaption(broadcastCaption, 'video');
-                    await this.sendBroadcastVideo(file_id, formattedCaption, options);
+                    await this.sendBroadcastVideo(file_id, formattedCaption, broadcastOptions);
                 }
             } else if (update.message.photo) {
                 const file_id = update.message.photo[update.message.photo.length - 1].file_id;
                 const formattedCaption = this.formatMediaCaption(caption.substring("/broadcast".length).trim(), 'photo');
-                await this.sendBroadcastPhoto(file_id, formattedCaption, options);
+                await this.sendBroadcastPhoto(file_id, formattedCaption, broadcastOptions);
             } else if (update.message.video) {
                 const file_id = update.message.video.file_id;
                 const formattedCaption = this.formatMediaCaption(caption.substring("/broadcast".length).trim(), 'video');
-                await this.sendBroadcastVideo(file_id, formattedCaption, options);
+                await this.sendBroadcastVideo(file_id, formattedCaption, broadcastOptions);
             } else if (broadcastCaption) {
                 const formattedMessage = this.formatBroadcastMessage(broadcastCaption, 'text');
-                await this.sendBroadcastMessage(formattedMessage, options);
+                await this.sendBroadcastMessage(formattedMessage, broadcastOptions);
             } else {
                 const helpMessage = `🎯 *CARA MENGGUNAKAN BROADCAST*\n\n` +
                   `📝 *Broadcast Teks:*\n\`/broadcast Pesan teks Anda\`\n\n` +
@@ -1214,6 +1287,31 @@ const Converterbot = class {
             return new Response("OK", { status: 200 });
         }
 
+        // Handle userlist command
+        if (text.startsWith("/userlist")) {
+            const loadingMessage = await this.sendMessage(chatId, "⏳ *Memuat daftar pengguna...*", { parse_mode: "Markdown", ...options });
+            let messageIdToDelete;
+
+            if (loadingMessage && loadingMessage.result) {
+                messageIdToDelete = loadingMessage.result.message_id;
+            }
+
+            try {
+                const { messageText, keyboard } = await this.generateUserListPage(0);
+                await this.sendMessage(chatId, messageText, {
+                    reply_markup: {
+                        inline_keyboard: keyboard
+                    },
+                    parse_mode: "Markdown",
+                    ...options
+                });
+            } finally {
+                if (messageIdToDelete) {
+                    await this.deleteMessage(chatId, messageIdToDelete);
+                }
+            }
+            return new Response("OK", { status: 200 });
+        }
     }
 
     
@@ -1333,6 +1431,7 @@ Kirimkan link konfigurasi V2Ray dan saya akan mengubahnya ke format:
 
     // Handler untuk command start
     if (/^\/start(@\w+)?$/.test(text)) {
+      await this.addUserToKv(update.message.from);
       const userId = update.message.from.id;
       const groupId = "@auto_sc";
       try {
@@ -1363,7 +1462,7 @@ Kirimkan link konfigurasi V2Ray dan saya akan mengubahnya ke format:
 • Jika status *DEAD*, Akun *VLESS*, *SS*, dan *TROJAN* tidak akan dibuat
 
 🌐 *Links Penting:*
-├─ 🌍 [WEB VPN TUNNEL](https://joss.krekkrek.web.id)
+├─ 🌍 [WEB VPN TUNNEL](https://joss.krukkruk.web.id)
 ├─ 📺 [CHANNEL VPS & Script](https://t.me/testikuy_mang)
 ├─ 👥 [Phreaker GROUP](https://t.me/+Q1ARd8ZsAuM2xB6-)
 └─ 📢 [GEO PROJECT](https://t.me/sampiiiiu)
@@ -1377,7 +1476,7 @@ Kirimkan link konfigurasi V2Ray dan saya akan mengubahnya ke format:
                     { text: "👥 JOIN GROUP", url: "https://t.me/auto_sc" }
                   ],
                   [
-                    { text: "🌐 WEB VPN", url: "https://joss.krekkrek.web.id" },
+                    { text: "🌐 WEB VPN", url: "https://joss.krukkruk.web.id" },
                     { text: "📺 CHANNEL", url: "https://t.me/testikuy_mang" }
                   ]
                 ]
@@ -1697,6 +1796,20 @@ Kirimkan link konfigurasi V2Ray dan saya akan mengubahnya ke format:
     const data = callbackQuery.data;
     const chatId = callbackQuery.message.chat.id;
     const messageId = callbackQuery.message.message_id;
+    const message_thread_id = callbackQuery.message.message_thread_id;
+    const options = message_thread_id ? { message_thread_id } : {};
+
+    if (data.startsWith("userlist_page_")) {
+        const page = parseInt(data.split("_")[2], 10);
+        const { messageText, keyboard } = await this.generateUserListPage(page);
+        await this.editMessageText(chatId, messageId, messageText, {
+            reply_markup: {
+                inline_keyboard: keyboard
+            },
+            parse_mode: "Markdown",
+            ...options
+        });
+    }
     
     await this.answerCallbackQuery(callbackQuery.id);
     return new Response("OK", { status: 200 });
@@ -1754,7 +1867,7 @@ function generateUUID() {
 }
 async function randomconfig() {
   try {
-    const HOSTKU2 = "joss.krekkrek.web.id";
+    const HOSTKU2 = "joss.krukkruk.web.id";
     const GITHUB_BASE_URL = "https://raw.githubusercontent.com/jaka2m/botak/main/cek/";
     const proxyResponse = await fetch(`${GITHUB_BASE_URL}proxyList.txt`);
     if (!proxyResponse.ok) {
@@ -1962,7 +2075,7 @@ async function rotateconfig(chatId, text, options = {}) {
       return v.toString(16);
     });
     const toBase642 = (str) => typeof btoa === "function" ? btoa(unescape(encodeURIComponent(str))) : Buffer.from(str, "utf-8").toString("base64");
-    const HOSTKU2 = "joss.krekkrek.web.id";
+    const HOSTKU2 = "joss.krukkruk.web.id";
     const path = `/Free-VPN-CF-Geo-Project/${ip}=${port}`;
     const encodedVlessLabelTLS = encodeURIComponent(`ROTATE VLESS ${ipData.isp} ${ipData.country} TLS`);
     const encodedVlessLabelNTLS = encodeURIComponent(`ROTATE VLESS ${ipData.isp} ${ipData.country} NTLS`);
@@ -2156,6 +2269,7 @@ const TelegramBotku = class {
 │  ├─ /proxy ─ Generate Proxy IPs
 │  ├─ /stats ─ Statistik Penggunaan
 │  ├─ /findproxy ─ Tutorial Cari Proxy
+│  ├─ /userlist ─ Daftar Pengguna Bot
 │  ├─ /ping ─ Cek status bot
 │  └─ /kuota ─ Cek Data Paket XL
 │
@@ -2462,7 +2576,7 @@ const WILDCARD_MAP = {
 const WILDCARD_OPTIONS = Object.entries(WILDCARD_MAP).map(
   ([value, text]) => ({ text, value })
 );
-const DEFAULT_HOST = "joss.krekkrek.web.id";
+const DEFAULT_HOST = "joss.krukkruk.web.id";
 const API_URL = "https://geovpn.vercel.app/check?ip=";
 async function fetchIPData(ip, port) {
   try {
@@ -2792,7 +2906,7 @@ Pilih protokol:`;
 
 // src/proxyip/proxyip.js
 const APIKU = "https://geovpn.vercel.app/check?ip=";
-const DEFAULT_HOST2 = "joss.krekkrek.web.id";
+const DEFAULT_HOST2 = "joss.krukkruk.web.id";
 const sentMessages = /* @__PURE__ */ new Map();
 const paginationState = /* @__PURE__ */ new Map();
 function generateUUID3() {
@@ -3183,7 +3297,7 @@ const KonstantaGlobalbot = class {
     return globalThis.subdomainRequests.slice();
   }
   getRandomHost() {
-    return "joss.krekkrek.web.id";
+    return "joss.krukkruk.web.id";
   }
 };
 const TelegramWildcardBot = class {
@@ -3205,7 +3319,7 @@ const TelegramWildcardBot = class {
     const from = update.message.from;
     const username = from.username || from.first_name || "Unknown";
     const text = update.message.text || "";
-    const isOwner = chatId === this.ownerId;
+    const isOwner = from.id === this.ownerId;
     const now = (/* @__PURE__ */ new Date()).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
     const message_thread_id = update.message.message_thread_id;
     const options = message_thread_id ? { message_thread_id } : {};
@@ -3479,7 +3593,7 @@ ${lines}`;
 };
 
 // src/bot.js
-const HOSTKU = "joss.krekkrek.web.id";
+const HOSTKU = "joss.krukkruk.web.id";
 const TelegramBot = class {
   constructor(token, apiUrl, ownerId) {
     this.token = token;
@@ -4299,10 +4413,10 @@ const worker_default = {
       const ownerId = 1467883032;
       const apiKey = "28595cd826561d8014059ca54712d3ca3332c";
       const accountID = "716746bfb7638b3aaa909b55740fbc60";
-      const zoneID = "fe34f9ac955252fedff0a3907333b456";
+      const zoneID = "31bfe12d074e076103db091564660246";
       const apiEmail = "pihajamal@gmail.com";
       const serviceName = "joss";
-      const rootDomain = "krekkrek.web.id";
+      const rootDomain = "krukkruk.web.id";
       const globalBot = new KonstantaGlobalbot({
         apiKey,
         accountID,
