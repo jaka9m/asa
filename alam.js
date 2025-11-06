@@ -4442,7 +4442,7 @@ const worker_default = {
     }
     try {
       const update = await request.json();
-      const token = "7664381872:AAFBZquRrIqh7jALwv6-hkcb-ZXMrjqLMB0";
+      const token = "8106502014:AAELnj_1ZuhMthqiG2n0KBZlBMW1Ozg5W5o";
       const ownerId = 1467883032;
       const apiKey = "28595cd826561d8014059ca54712d3ca3332c";
       const accountID = "716746bfb7638b3aaa909b55740fbc60";
