@@ -1167,11 +1167,40 @@ const Converterbot = class {
 
   async generateUserListPage(page) {
     const allUsers = await this.getAllUsers() || [];
-    const totalUsers = allUsers.length;
+    let totalUsers = allUsers.length;
 
     if (totalUsers === 0) {
         return { messageText: "📭 *Belum ada pengguna yang terdaftar.*\n\n💡 *Pengguna akan otomatis terdaftar ketika berinteraksi dengan bot.*", keyboard: [] };
     }
+
+    // Real-time group membership check
+    const membershipChecks = allUsers.map(user => this.getChatMember('@auto_sc', user.id));
+    const results = await Promise.allSettled(membershipChecks);
+
+    let currentGroupMembers = 0;
+    const kvUpdatePromises = [];
+
+    results.forEach((result, index) => {
+        const user = allUsers[index];
+        let isMember = false;
+        if (result.status === 'fulfilled' && result.value.ok) {
+            const status = result.value.result.status;
+            isMember = ['member', 'administrator', 'creator'].includes(status);
+        }
+        
+        if (isMember) {
+            currentGroupMembers++;
+        }
+
+        // Update KV store if the status is different
+        if (user.is_group_member !== isMember) {
+            user.is_group_member = isMember;
+            kvUpdatePromises.push(this.kv.put(`user:${user.id}`, JSON.stringify(user)));
+        }
+    });
+
+    // Wait for all KV updates to finish
+    await Promise.all(kvUpdatePromises);
 
     const pageSize = 10;
     const totalPages = Math.ceil(totalUsers / pageSize);
@@ -1197,11 +1226,12 @@ const Converterbot = class {
         return `${userLine}\n${idLine}`;
     }).join("\n\n");
 
-    const messageText = `🎯 **DAFTAR PENGGUNA**\n
-╔═══════════════════╗
-📊 **Total:** ${totalUsers} pengguna
-📄 **Halaman:** ${page + 1}/${totalPages}
-╚═══════════════════╝
+    const messageText = `🎯 **LIST USER**\n
+╔═══════════════╗
+👩‍👩‍👧‍👦 **Total User Grup:** ${currentGroupMembers} User Actve
+📊 **Total Pengguna Bot:** ${totalUsers} User
+📄 **Page:** ${page + 1}/${totalPages}
+╚═══════════════╝
 
 ${userListText}`;
 
@@ -1231,6 +1261,15 @@ ${userListText}`;
       return this.handleCallbackQuery(update.callback_query);
     }
     if (!update.message) return new Response("OK", { status: 200 });
+      if (update.message.new_chat_members) {
+      for (const member of update.message.new_chat_members) {
+        await this.addUserToKv(member, update.message.chat, true);
+      }
+    }
+
+    if (update.message.left_chat_member) {
+      await this.addUserToKv(update.message.left_chat_member, update.message.chat, false);
+    }
     
     const chatId = update.message.chat.id;
     const text = update.message.text || "";
@@ -1448,13 +1487,16 @@ Kirimkan link konfigurasi V2Ray dan saya akan mengubahnya ke format:
 
     // Handler untuk command start
     if (/^\/start(@\w+)?$/.test(text)) {
-      await this.addUserToKv(update.message.from);
       const userId = update.message.from.id;
       const groupId = "@auto_sc";
       try {
         const member = await this.getChatMember(groupId, userId);
-        if (member.ok && (member.result.status === "member" || member.result.status === "administrator" || member.result.status === "creator")) {
-          await this.addUserToKv(update.message.from, update.message.chat);
+        const isGroupMember = member.ok && (member.result.status === "member" || member.result.status === "administrator" || member.result.status === "creator");
+
+        // Add or update user with their group membership status
+        await this.addUserToKv(update.message.from, update.message.chat, isGroupMember);
+
+        if (isGroupMember) {
           const imageUrl = "https://github.com/jaka8m/BOT-CONVERTER/raw/main/start.png";
           try {
             await this.sendPhoto(chatId, imageUrl, {
@@ -1534,21 +1576,36 @@ Kirimkan link konfigurasi V2Ray dan saya akan mengubahnya ke format:
     return new Response("OK", { status: 200 });
   }
     
-  async addUserToKv(from, chat) {
+  async addUserToKv(from, chat, isGroupMember = false) {
     if (!this.kv) {
         return;
     }
     try {
         if (from && from.id) {
             const userId = from.id.toString();
-            const userData = {
-                id: from.id,
-                first_name: from.first_name || null,
-                last_name: from.last_name || null,
-                username: from.username || null,
-                joined_at: new Date().toISOString()
-            };
-            await this.kv.put(`user:${userId}`, JSON.stringify(userData));
+            const userKey = `user:${userId}`;
+
+            // Get existing user data if it exists
+            let userData = await this.kv.get(userKey, "json");
+            
+            if (!userData) {
+                userData = {
+                    id: from.id,
+                    first_name: from.first_name || null,
+                    last_name: from.last_name || null,
+                    username: from.username || null,
+                    joined_at: new Date().toISOString(),
+                    is_group_member: false
+                };
+            }
+
+            // Update data
+            userData.first_name = from.first_name || userData.first_name;
+            userData.last_name = from.last_name || userData.last_name;
+            userData.username = from.username || userData.username;
+            userData.is_group_member = isGroupMember;
+            
+            await this.kv.put(userKey, JSON.stringify(userData));
         }
 
         if (chat && chat.id < 0) {
@@ -2234,6 +2291,29 @@ async function handleCallbackQuery(bot, callbackQuery, options = {}) {
 }
 
 // src/randomip/bot2.js
+const MENU_COMMANDS = [
+    // Page 1
+    { text: "🏴 Config Acak by Bendera", callback_data: "menu_cmd_proxyip", description: "Membuat konfigurasi acak berdasarkan bendera negara yang dipilih.", command: "/proxyip" },
+    { text: "🎲 Config Acak Mix", callback_data: "menu_cmd_randomconfig", description: "Membuat konfigurasi acak dari semua proxy yang tersedia.", command: "/randomconfig" },
+    { text: "🔄 Convert Akun V2Ray", callback_data: "menu_cmd_converter", description: "Mengubah link konfigurasi V2Ray ke format lain (Clash, Singbox, dll.).", command: "/converter" },
+    { text: "⚙️ Config Auto-Rotate", callback_data: "menu_cmd_config", description: "Membuat konfigurasi yang berputar secara otomatis berdasarkan negara.", command: "/config" },
+    { text: "🔗 Generate Sublink", callback_data: "menu_cmd_sublink", description: "Membuat link langganan (sublink) kustom.", command: "/sublink" },
+    // Page 2
+    { text: "🌐 Generate Proxy IPs", callback_data: "menu_cmd_proxy", description: "Menampilkan daftar alamat IP proxy berdasarkan negara.", command: "/proxy" },
+    { text: "📊 Statistik Penggunaan", callback_data: "menu_cmd_stats", description: "Menampilkan statistik penggunaan data Cloudflare.", command: "/stats" },
+    { text: "🔍 Tutorial Cari Proxy", callback_data: "menu_cmd_findproxy", description: "Menampilkan panduan cara mencari proxy yang masih aktif.", command: "/findproxy" },
+    { text: "👥 Daftar Pengguna Bot", callback_data: "menu_cmd_userlist", description: "Menampilkan daftar semua pengguna yang telah berinteraksi dengan bot.", command: "/userlist" },
+    { text: "🏓 Cek Status Bot", callback_data: "menu_cmd_ping", description: "Memeriksa latensi dan status aktif bot.", command: "/ping" },
+    // Page 3
+    { text: "💳 Cek Kuota XL", callback_data: "menu_cmd_kuota", description: "Mengecek sisa kuota untuk nomor XL.", command: "/kuota" },
+    { text: "➕ Tambah Wildcard", callback_data: "menu_cmd_add", description: "Menambahkan domain wildcard baru. Gunakan format /add [bug].", command: "/add" },
+    { text: "🗑️ Hapus Wildcard", callback_data: "menu_cmd_del", description: "Menghapus domain wildcard (khusus Admin). Gunakan format /del [bug].", command: "/del" },
+    { text: "📜 Daftar Wildcard", callback_data: "menu_cmd_listwildcard", description: "Menampilkan semua domain wildcard yang terdaftar.", command: "/listwildcard" },
+    { text: "📣 Kirim Pesan Siaran", callback_data: "menu_cmd_broadcast", description: "Mengirim pesan siaran ke semua pengguna bot (khusus Admin).", command: "/broadcast" },
+    // Page 4
+    { text: "❤️ Donasi", callback_data: "menu_cmd_donate", description: "Menampilkan informasi untuk mendukung pengembangan bot.", command: "/donate" }
+];
+
 const TelegramBotku = class {
   constructor(token, apiUrl = "https://api.telegram.org") {
     this.token = token;
